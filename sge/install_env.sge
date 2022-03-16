@@ -1,0 +1,38 @@
+#!/bin/bash
+#$ -N install_env
+#$ -l mem=3G
+#$ -pe default 1
+
+cd $HOME
+
+if [ ! -d "$HOME/derive_conceptualspaces" ]; then
+    git clone https://github.com/cstenkamp/derive_conceptualspaces.git
+fi
+
+if [ ! -d "$HOME/miniconda" ]; then
+    wget -q https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh
+    bash Miniconda3-latest-Linux-x86_64.sh -b -p "$HOME/miniconda"
+    rm Miniconda3-latest-Linux-x86_64.sh
+fi
+
+export PATH="$HOME/miniconda/bin:$PATH"
+
+conda create -y -q --name watcher python=3.8
+source miniconda/bin/activate watcher
+pip install python-dotenv pyyaml
+
+conda create -y -q --name derive_conceptualspaces python=3.10.0
+source miniconda/bin/activate derive_conceptualspaces
+pip install --upgrade pip
+pip install --pre torch -f https://download.pytorch.org/whl/nightly/cpu/torch_nightly.html
+conda install -c alubbock pygraphviz
+pip install -r $HOME/derive_conceptualspaces/requirements-dev.txt
+pip install -r $HOME/derive_conceptualspaces/requirements.txt
+python3 -c "import nltk; nltk.download('stopwords'); nltk.download('punkt'); nltk.download('wordnet'); nltk.download('averaged_perceptron_tagger')"
+pip install $HOME/derive_conceptualspaces
+#after this you should be able to run it (on nodes != gate) with `python -m derive_conceptualspace generate-conceptualspace`
+
+source miniconda/bin/deactivate
+
+cd $HOME/miniconda/pkgs
+rm *.tar.bz2 -f 2> /dev/null

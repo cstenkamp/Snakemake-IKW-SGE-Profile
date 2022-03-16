@@ -1,0 +1,98 @@
+#!/bin/bash
+#$ -N smk_runner
+#$ -l mem=1G
+
+################################### Env-vars you need ##################################
+
+if [[ -z "${MA_BASE_DIR}" ]]; then
+  echo "You need the env-var MA_BASE_DIR, pointing to the root of your data!";
+  exit 1;
+fi
+if [[ -z "${MA_CODEPATH}" ]]; then
+  echo "You need the env-var MA_CODEPATH, pointing to the root of the code!";
+  exit 1;
+fi
+if [[ -z "${MA_CONDAPATH}" ]]; then
+  export MA_CONDAPATH=$HOME/miniconda
+fi
+if [[ -z "${MA_CUSTOM_ACCTFILE}" ]]; then
+  export MA_CUSTOM_ACCTFILE=$HOME/custom_acctfile.yml
+fi
+if [[ -z "${MA_CONFIGDIR}" ]]; then
+  export MA_CONFIGDIR=$MA_CODEPATH/config
+fi
+if [[ -z "${WALLTIME}" ]]; then
+  echo "You need the env-var WALLTIME, specifying the walltime for the Sun Grid Engine!";
+  exit 1;
+fi
+
+
+########################## stuff you don't need to care about ##########################
+# set other env-vars
+export WALL_SECS=$(echo $WALLTIME | awk -F: '{ print ($1 * 3600) + ($2 * 60) + $3 }' )
+export RUN_NR=${RUN_NR:-0}
+export RUN_NR=$((RUN_NR+1))
+echo "This is run nr $RUN_NR"
+
+# get the actual env-file and whatever else is in the MA_SELECT_ENV_FILE
+export $(cat $MA_SELECT_ENV_FILE | envsubst | xargs)
+export $(cat $MA_SELECT_ENV_FILE | sed 's/{\(.*\)}/\$\1/g' | envsubst | xargs)
+
+if [[ -f "$MA_ENV_FILE" ]]; then
+    echo "ENV-FILE: $MA_ENV_FILE";
+else
+   export MA_ENV_FILE=$MA_CONFIGDIR/$MA_ENV_FILE;
+   echo "ENV-FILE: $MA_ENV_FILE"
+fi
+
+export PATH="$CONDAPATH:$PATH"
+export RUNNERFILE="$CODEPATH/workflow/sge/run_snakemake.sge"
+export PYTHONPATH="$CODEPATH:$PYTHONPATH"
+
+# activate env etc (TODO make env-name an arg)
+source $MA_CONDAPATH/bin/activate ${MA_CONDA_ENVNAME:-derive_conceptualspaces}
+cd $MA_CODEPATH
+
+echo "Snakemake-Args: $SNAKEMAKE_ARGS"
+echo "Will kill in $WALL_SECS" seconds.
+
+while [[ "$(qstat | grep -o smk_runner | wc -l)" -ge 2 ]]; do
+    sleep 5;
+    echo "There is another instance still active, giving it time to die..."
+done
+
+###################### actual runner stuff ######################
+if [ $RUN_NR -eq 1 ]; then
+    snakemake --directory $MA_BASE_DIR $SNAKEMAKE_ARGS --dry-run --forceall > all_rules.txt
+fi
+snakemake --directory $MA_BASE_DIR $SNAKEMAKE_ARGS --unlock
+timeout -k 30 $(( $WALL_SECS-90 )) snakemake --directory $MA_BASE_DIR -p $SNAKEMAKE_ARGS --profile $MA_GRIDCONF
+# `timeout -k x y` means `send shutdown after y seconds, and x seconds after that send SIGKILL`. The SIGKILL must be > config.latency-wait !!
+# there's `--detailed-summary`
+
+###################### closing stuff ######################
+# restarting if not finished
+retval=$?
+echo "Main process ended. Return-value is $retval"
+if [ $retval -eq 124 ] || [ $retval -eq 137 ] || [ $retval -eq 1 ] ; then # (124 & 137 are timeout-kill, 1 is snakemake-error)
+  if (( $RUN_NR < $RUNNER_RESTARTS )); then
+    echo "COMMAND TO RUN: qsub -V -l h_rt=$WALLTIME -v WALLTIME=$WALLTIME -v SNAKEMAKE_ARGS=$SNAKEMAKE_ARGS -v MA_SELECT_ENV_FILE=$MA_SELECT_ENV_FILE
+    -v MA_BASE_DIR=$MA_BASE_DIR -v MA_CODEPATH=$MA_CODEPATH -v MA_CONDAPATH=$MA_CONDAPATH -v RUN_NR=$RUN_NR -v MA_CUSTOM_ACCTFILE=$MA_CUSTOM_ACCTFILE
+    -v MA_CONFIGDIR=$MA_CONFIGDIR -v RUNNER_RESTARTS=$RUNNER_RESTARTS  $MA_CODEPATH/workflow/sge/run_snakemake.sge"
+
+    qsub -V -l h_rt=$WALLTIME -v WALLTIME=$WALLTIME -v SNAKEMAKE_ARGS="$SNAKEMAKE_ARGS" -v MA_SELECT_ENV_FILE="$MA_SELECT_ENV_FILE" \
+    -v MA_BASE_DIR="$MA_BASE_DIR" -v MA_CODEPATH="$MA_CODEPATH" -v MA_CONDAPATH="$MA_CONDAPATH" -v RUN_NR=$RUN_NR \
+    -v MA_CUSTOM_ACCTFILE="$MA_CUSTOM_ACCTFILE" -v MA_CONFIGDIR="$MA_CONFIGDIR" -v RUNNER_RESTARTS=$RUNNER_RESTARTS \
+    $MA_CODEPATH/workflow/sge/run_snakemake.sge
+    sleep 2
+    exit 0
+  fi
+fi
+
+# sending a message IF you are finished
+snakemake --directory $MA_BASE_DIR $SNAKEMAKE_ARGS --report
+
+if [[ -z "${TELEGRAM_BOT_TOKEN}" ]] ; then
+    (export $(cat $MA_ENV_FILE | xargs) && python $CODEPATH/misc_util/telegram_notifier.py "snakemake on $(hostname) ended")
+fi
+echo "snakemake on $(hostname) ended"
